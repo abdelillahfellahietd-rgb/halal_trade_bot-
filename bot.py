@@ -1,238 +1,111 @@
 import ccxt
 import time
-from datetime import datetime, timedelta
-import urllib.request
-import urllib.parse
+import requests
+from datetime import datetime
 
-TOKEN = "8665916676:AAHUNeu0DR5_IC3nDJ_SDue2ZDoVXHjXV9k"
-CHAT_ID = "5468997397"
+# ============= بيانات التيليجرام =============
+TELEGRAM_TOKEN = "8665916676:AAESitl3yvoqTHjhWdCyCy32ol3djbwZTmY"
+TELEGRAM_CHAT_ID = "5468997397"
 
-exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
-
-coins = [
-    'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'SUI/USDT',
-    'AVAX/USDT', 'LINK/USDT', 'DOT/USDT', 'ARB/USDT', 'NEAR/USDT',
-    'LTC/USDT', 'SEI/USDT', 'HBAR/USDT', 'XLM/USDT', 'OP/USDT',
-    'FET/USDT', 'APT/USDT', 'ATOM/USDT', 'ALGO/USDT', 'FIL/USDT',
+# ============= العملات =============
+SYMBOLS = [
+    'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'ADA/USDT',
+    'XRP/USDT', 'DOT/USDT', 'LINK/USDT', 'XLM/USDT', 'AVAX/USDT',
+    'NEAR/USDT', 'ATOM/USDT', 'ALGO/USDT', 'VET/USDT', 'HBAR/USDT',
+    'ICP/USDT', 'ETC/USDT', 'EGLD/USDT', 'IMX/USDT', 'MATIC/USDT',
+    'UNI/USDT', 'LTC/USDT', 'BCH/USDT', 'FIL/USDT', 'GRT/USDT'
 ]
 
-def send(msg):
+# ============= الإعدادات =============
+MIN_DROP = 1.8          # هبوط 1.8% (للاختبار خفف إلى 0.3)
+RSI_MAX = 40            # RSI أقل من 40 (للاختبار ارفع إلى 70)
+TAKE_PROFIT = 1.0       # هدف 1%
+STOP_LOSS = 0.5         # وقف 0.5%
+
+exchange = ccxt.binance({'enableRateLimit': True})
+open_trades = {}
+
+def send_telegram(message):
     try:
-        text = urllib.parse.quote(msg)
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage?chat_id={CHAT_ID}&text={text}"
-        urllib.request.urlopen(url, timeout=10)
-    except:
-        pass
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, json={'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'HTML'}, timeout=10)
+        print("✅ تم الإرسال")
+    except Exception as e:
+        print(f"❌ خطأ: {e}")
 
-def get_rsi(prices):
-    if len(prices) < 15: return 50
-    g = sum(max(prices[i]-prices[i-1], 0) for i in range(len(prices)-14, len(prices)))
-    l = sum(max(prices[i-1]-prices[i], 0) for i in range(len(prices)-14, len(prices)))
-    if l == 0: return 100
-    return 100 - (100 / (1 + g/l))
+def calculate_rsi(closes):
+    if len(closes) < 15:
+        return 50
+    gains, losses = 0, 0
+    for i in range(-14, 0):
+        diff = closes[i] - closes[i-1]
+        if diff > 0:
+            gains += diff
+        else:
+            losses += abs(diff)
+    avg_gain = gains / 14
+    avg_loss = losses / 14
+    if avg_loss == 0:
+        return 100
+    return 100 - (100 / (1 + (avg_gain / avg_loss)))
 
-def get_ema(prices, period):
-    if len(prices) < period: return prices[-1]
-    k = 2 / (period + 1)
-    e = sum(prices[:period]) / period
-    for p in prices[period:]: e = p * k + e * (1 - k)
-    return e
+def run_bot():
+    print("🤖 بوت السكالبينج شغال...")
+    send_telegram("🚀 <b>بوت السكالبينج شغال!</b>\n✅ 25 عملة حلال")
+    
+    last_alert = {}
+    
+    while True:
+        try:
+            for symbol in SYMBOLS:
+                if symbol in last_alert:
+                    if (datetime.now() - last_alert[symbol]).seconds < 1200:
+                        continue
+                
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=30)
+                if len(ohlcv) < 20:
+                    continue
+                
+                last = ohlcv[-1]
+                prev = ohlcv[-2]
+                close = last[4]
+                prev_close = prev[4]
+                
+                drop = (prev_close - close) / prev_close * 100
+                if drop < MIN_DROP:
+                    continue
+                
+                closes = [c[4] for c in ohlcv]
+                rsi = calculate_rsi(closes)
+                if rsi > RSI_MAX:
+                    continue
+                
+                tp = close * (1 + TAKE_PROFIT/100)
+                sl = close * (1 - STOP_LOSS/100)
+                
+                msg = f"""🔥 <b>إشارة شراء!</b> 🔥
 
-def get_atr(highs, lows, closes, period=14):
-    if len(closes) < period + 1: return 0
-    trs = []
-    for i in range(1, len(closes)):
-        hl = highs[i] - lows[i]
-        hc = abs(highs[i] - closes[i-1])
-        lc = abs(lows[i] - closes[i-1])
-        trs.append(max(hl, hc, lc))
-    return sum(trs[-period:]) / period
+<b>{symbol}</b>
+💰 السعر: {close:.4f}
+📉 الهبوط: {drop:.1f}%
+📊 RSI: {rsi:.1f}
 
-def get_vwap(prices, volumes):
-    if len(prices) < 1: return prices[-1]
-    total_vol = sum(volumes)
-    if total_vol == 0: return prices[-1]
-    return sum(p * v for p, v in zip(prices, volumes)) / total_vol
-
-def btc_trend_bullish():
-    """فلتر BTC: هل السوق العام صاعد؟"""
-    try:
-        ohlcv = exchange.fetch_ohlcv('BTC/USDT', '5m', limit=30)
-        closes = [c[4] for c in ohlcv]
-        ema9 = get_ema(closes, 9)
-        ema21 = get_ema(closes, 21)
-        return closes[-1] > ema9 and ema9 > ema21
-    except:
-        return True  # إذا فشل، اسمح بالدخول
-
-# ═══════════════════════════
-send("🟢 بوت محسن يعمل!\n✅ BTC Filter + VWAP + ATR + BE + Cooldown")
-# ═══════════════════════════
-
-trades = {}
-wins = 0
-losses = 0
-consecutive_losses = 0
-cooldown_until = datetime.now()
-day = datetime.now().day
-
-while True:
-    try:
-        if datetime.now().day != day:
-            wins = 0; losses = 0; trades = {}; day = datetime.now().day
-        
-        # تبريد
-        if datetime.now() < cooldown_until:
+🎯 الهدف: {tp:.4f} (+{TAKE_PROFIT}%)
+🛡️ الوقف: {sl:.4f} (-{STOP_LOSS}%)"""
+                
+                print(f"\n✅ {symbol} - هبوط {drop:.1f}%")
+                send_telegram(msg)
+                last_alert[symbol] = datetime.now()
+                time.sleep(5)
+                
+                time.sleep(1)
+            
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 يبحث عن إشارات...")
             time.sleep(30)
-            continue
-        
-        # فلتر BTC
-        btc_ok = btc_trend_bullish()
-        if not btc_ok:
+            
+        except Exception as e:
+            print(f"❌ خطأ: {e}")
             time.sleep(60)
-            continue
-        
-        # مراقبة الصفقات
-        closed = []
-        for coin, trade in list(trades.items()):
-            try:
-                t = exchange.fetch_ticker(coin)
-                current = t['last']
-                entry = trade['entry']
-                pnl_pct = (current - entry) / entry * 100
-                
-                # نقطة تعادل
-                if not trade.get('be_active') and pnl_pct >= 0.5:
-                    trade['sl'] = entry * 1.001
-                    trade['be_active'] = True
-                    send(f"🔄 {coin}: نقطة تعادل!")
-                
-                # وقف متحرك (بعد +1%)
-                if pnl_pct >= 1.0:
-                    new_sl = current * 0.995
-                    if new_sl > trade['sl']:
-                        trade['sl'] = new_sl
-                
-                # هدف
-                if current >= trade['tp']:
-                    wins += 1; consecutive_losses = 0
-                    send(f"🎯 *هدف!* {coin}\n💰 +1.5% ✅ | {wins}✅/{losses}❌")
-                    closed.append(coin)
-                # وقف
-                elif current <= trade['sl']:
-                    losses += 1; consecutive_losses += 1
-                    send(f"🛑 *وقف* {coin}\n💸 {pnl_pct:.2f}% ❌ | {wins}✅/{losses}❌")
-                    closed.append(coin)
-                    # تبريد
-                    if consecutive_losses >= 2:
-                        cooldown_until = datetime.now() + timedelta(minutes=30)
-                        send(f"🔴 تبريد 30 دقيقة! ({consecutive_losses} خسائر)")
-                # وقت
-                elif time.time() - trade['time'] > 900:
-                    if current > entry:
-                        wins += 1; consecutive_losses = 0
-                        send(f"⏰ *وقت* {coin}\n💰 ربح ✅")
-                    else:
-                        losses += 1; consecutive_losses += 1
-                        send(f"⏰ *وقت* {coin}\n💸 خسارة ❌")
-                    closed.append(coin)
-            except:
-                pass
-        
-        for c in closed:
-            del trades[c]
-        
-        # بحث عن فرص
-        if len(trades) < 8:
-            for coin in coins:
-                if coin in trades or len(trades) >= 8:
-                    break
-                
-                try:
-                    ohlcv_1m = exchange.fetch_ohlcv(coin, '1m', limit=60)
-                    closes = [c[4] for c in ohlcv_1m]
-                    highs = [c[2] for c in ohlcv_1m]
-                    lows = [c[3] for c in ohlcv_1m]
-                    volumes = [c[5] for c in ohlcv_1m]
-                    current = closes[-1]
-                    
-                    change_5m = (closes[-1]-closes[-6])/closes[-6]*100 if len(closes)>5 else 0
-                    rsi = get_rsi(closes)
-                    atr = get_atr(highs, lows, closes)
-                    atr_pct = atr / current * 100
-                    ema9 = get_ema(closes, 9)
-                    ema21 = get_ema(closes, 21)
-                    vwap = get_vwap(closes[-30:], volumes[-30:])
-                    avg_vol = sum(volumes[-15:])/15 if len(volumes)>=15 else volumes[-1]
-                    vol_ratio = volumes[-1]/avg_vol if avg_vol>0 else 1
-                    
-                    score = 0
-                    reasons = []
-                    
-                    # BTC فلتر (2pts)
-                    if btc_ok: score += 2; reasons.append("BTC صاعد")
-                    
-                    # VWAP فلتر (2pts)
-                    if current > vwap: score += 2; reasons.append("فوق VWAP")
-                    
-                    # EMA فلتر (1pt)
-                    if ema9 > ema21: score += 1; reasons.append("EMA9>EMA21")
-                    
-                    # RSI (2pts)
-                    if rsi < 35: score += 2; reasons.append(f"RSI={rsi:.0f}")
-                    
-                    # حجم (2pts)
-                    if vol_ratio > 2: score += 2; reasons.append(f"حجم {vol_ratio:.0f}x")
-                    
-                    # هبوط (2pts)
-                    if change_5m < -2: score += 2; reasons.append(f"هبوط {change_5m:.1f}%")
-                    
-                    # ارتداد (1pt)
-                    if closes[-1] > closes[-2]: score += 1; reasons.append("ارتداد")
-                    
-                    # ATR فلتر - تجنب التذبذب المنخفض جداً
-                    if atr_pct < 0.1:
-                        score -= 3
-                        reasons.append("تذبذب منخفض")
-                    
-                    if score >= 7:
-                        entry = current
-                        sl = entry * 0.99
-                        tp = entry * 1.015
-                        
-                        trades[coin] = {
-                            'entry': entry, 'sl': sl, 'tp': tp,
-                            'time': time.time(), 'score': score,
-                            'be_active': False
-                        }
-                        
-                        wr = wins/(wins+losses)*100 if (wins+losses)>0 else 0
-                        send(f"""🟢 *فرصة!*
-{coin} | ${entry:.4f}
-📉 هبوط: {change_5m:.1f}% | RSI: {rsi:.0f}
-📊 ATR: {atr_pct:.2f}% | VWAP: ${vwap:.4f}
-🛑 وقف: ${sl:.4f} | 🎯 هدف: ${tp:.4f}
-⭐ {score}/10 | {chr(10).join('✅ '+r for r in reasons)}
-📊 {wins}✅/{losses}❌ | {wr:.0f}%""")
-                        time.sleep(0.5)
-                    
-                    time.sleep(0.05)
-                except:
-                    pass
-        
-        # تحديث كل 10 دقائق
-        if datetime.now().minute % 10 == 0:
-            wr = wins/(wins+losses)*100 if (wins+losses)>0 else 0
-            cd = ""
-            if datetime.now() < cooldown_until:
-                remaining = int((cooldown_until - datetime.now()).total_seconds() / 60)
-                cd = f" | 🔴 تبريد {remaining}د"
-            send(f"📊 مفتوحة: {len(trades)} | {wins}✅/{losses}❌ | {wr:.0f}% | BTC:{'🟢' if btc_ok else '🔴'}{cd}")
-        
-        time.sleep(15)
-        
-    except KeyboardInterrupt:
-        send("🔴 توقف البوت")
-        break
-    except:
-        time.sleep(10)
+
+if __name__ == "__main__":
+    run_bot()
